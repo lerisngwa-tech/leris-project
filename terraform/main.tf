@@ -70,6 +70,7 @@ module "eks" {
     }
     github_actions = {
       principal_arn = aws_iam_role.github_actions.arn
+      kubernetes_groups = ["github-actions-deployers"]
       policy_associations = {
         edit = {
           policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
