@@ -88,6 +88,15 @@ resource "aws_s3_bucket" "docs" {
   force_destroy = true
 }
 
+resource "aws_s3_bucket_lifecycle_configuration" "docs" {
+  bucket = aws_s3_bucket.docs.id
+  rule {
+    id     = "expire-old-versions"
+    status = "Enabled"
+    noncurrent_version_expiration { noncurrent_days = 90 }
+  }
+}
+
 resource "aws_s3_bucket_versioning" "docs" {
   bucket = aws_s3_bucket.docs.id
   versioning_configuration { status = "Enabled" }
