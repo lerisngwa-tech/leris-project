@@ -1,10 +1,44 @@
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
+const client = require("prom-client");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// ── Prometheus metrics ────────────────────────────────────────────────────────
+const register = new client.Registry();
+client.collectDefaultMetrics({ register });
+
+const httpRequests = new client.Counter({
+  name: "http_requests_total",
+  help: "Total HTTP requests",
+  labelNames: ["method", "route", "status"],
+  registers: [register],
+});
+
+const httpDuration = new client.Histogram({
+  name: "http_request_duration_seconds",
+  help: "HTTP request duration in seconds",
+  labelNames: ["method", "route"],
+  buckets: [0.01, 0.05, 0.1, 0.3, 0.5, 1, 2],
+  registers: [register],
+});
+
+app.use((req, res, next) => {
+  const end = httpDuration.startTimer({ method: req.method, route: req.path });
+  res.on("finish", () => {
+    httpRequests.inc({ method: req.method, route: req.path, status: res.statusCode });
+    end();
+  });
+  next();
+});
+
+app.get("/metrics", async (_, res) => {
+  res.set("Content-Type", register.contentType);
+  res.end(await register.metrics());
+});
 
 const pool = new Pool({
   host: process.env.DB_HOST,

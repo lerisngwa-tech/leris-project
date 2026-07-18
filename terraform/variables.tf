@@ -14,3 +14,8 @@ variable "db_password" {
   description = "RDS master password"
   sensitive   = true
 }
+
+variable "grafana_password" {
+  description = "Grafana admin password"
+  sensitive   = true
+}

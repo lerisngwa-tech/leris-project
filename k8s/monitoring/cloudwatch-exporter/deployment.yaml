@@ -1,0 +1,59 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cloudwatch-exporter
+  namespace: monitoring
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::246312965731:role/cloudwatch-exporter-role
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudwatch-exporter
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cloudwatch-exporter
+  template:
+    metadata:
+      labels:
+        app: cloudwatch-exporter
+    spec:
+      serviceAccountName: cloudwatch-exporter
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: cloudwatch-exporter
+          image: prom/cloudwatch-exporter:0.15.5
+          ports:
+            - containerPort: 9106
+          volumeMounts:
+            - name: config
+              mountPath: /config
+          args: [/config/config.yml]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: cloudwatch-exporter-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudwatch-exporter
+  namespace: monitoring
+spec:
+  selector:
+    app: cloudwatch-exporter
+  ports:
+    - port: 9106
+      targetPort: 9106

@@ -1,0 +1,209 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus.monitoring.svc.cluster.local:9090
+        isDefault: true
+        editable: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: monitoring
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: default
+        folder: Onboarding Platform
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: monitoring
+data:
+  platform.json: |
+    {
+      "title": "Platform — EKS Nodes & Pods",
+      "uid": "platform-overview",
+      "panels": [
+        {
+          "title": "Node CPU Utilisation (%)",
+          "type": "timeseries",
+          "gridPos": {"x":0,"y":0,"w":12,"h":8},
+          "targets": [{
+            "expr": "100 - (avg by(node) (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100)",
+            "legendFormat": "{{node}}"
+          }]
+        },
+        {
+          "title": "Node Memory Utilisation (%)",
+          "type": "timeseries",
+          "gridPos": {"x":12,"y":0,"w":12,"h":8},
+          "targets": [{
+            "expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
+            "legendFormat": "{{instance}}"
+          }]
+        },
+        {
+          "title": "Pod Restarts",
+          "type": "timeseries",
+          "gridPos": {"x":0,"y":8,"w":12,"h":8},
+          "targets": [{
+            "expr": "increase(kube_pod_container_status_restarts_total{namespace='onboarding'}[1h])",
+            "legendFormat": "{{pod}}"
+          }]
+        },
+        {
+          "title": "Pod CPU Usage",
+          "type": "timeseries",
+          "gridPos": {"x":12,"y":8,"w":12,"h":8},
+          "targets": [{
+            "expr": "sum by(pod) (rate(container_cpu_usage_seconds_total{namespace='onboarding'}[5m]))",
+            "legendFormat": "{{pod}}"
+          }]
+        }
+      ],
+      "schemaVersion": 36,
+      "version": 1
+    }
+
+  application.json: |
+    {
+      "title": "Application — Backend API",
+      "uid": "app-backend",
+      "panels": [
+        {
+          "title": "Request Rate (req/s)",
+          "type": "timeseries",
+          "gridPos": {"x":0,"y":0,"w":12,"h":8},
+          "targets": [{
+            "expr": "sum(rate(http_requests_total{job='onboarding-backend'}[5m])) by (method, route)",
+            "legendFormat": "{{method}} {{route}}"
+          }]
+        },
+        {
+          "title": "Error Rate (5xx %)",
+          "type": "timeseries",
+          "gridPos": {"x":12,"y":0,"w":12,"h":8},
+          "targets": [{
+            "expr": "sum(rate(http_requests_total{job='onboarding-backend',status=~'5..'}[5m])) / sum(rate(http_requests_total{job='onboarding-backend'}[5m])) * 100",
+            "legendFormat": "5xx error rate"
+          }]
+        },
+        {
+          "title": "p99 Latency (ms)",
+          "type": "timeseries",
+          "gridPos": {"x":0,"y":8,"w":12,"h":8},
+          "targets": [{
+            "expr": "histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket{job='onboarding-backend'}[5m])) by (le, route)) * 1000",
+            "legendFormat": "p99 {{route}}"
+          }]
+        },
+        {
+          "title": "Active DB Connections",
+          "type": "stat",
+          "gridPos": {"x":12,"y":8,"w":12,"h":8},
+          "targets": [{
+            "expr": "pg_stat_activity_count",
+            "legendFormat": "connections"
+          }]
+        }
+      ],
+      "schemaVersion": 36,
+      "version": 1
+    }
+
+  cloudwatch.json: |
+    {
+      "title": "CloudWatch — RDS & ALB",
+      "uid": "cloudwatch-aws",
+      "panels": [
+        {
+          "title": "RDS CPU Utilisation (%)",
+          "type": "timeseries",
+          "gridPos": {"x":0,"y":0,"w":12,"h":8},
+          "targets": [{
+            "expr": "aws_rds_cpuutilization_average",
+            "legendFormat": "RDS CPU"
+          }]
+        },
+        {
+          "title": "RDS DB Connections",
+          "type": "timeseries",
+          "gridPos": {"x":12,"y":0,"w":12,"h":8},
+          "targets": [{
+            "expr": "aws_rds_database_connections_average",
+            "legendFormat": "Connections"
+          }]
+        },
+        {
+          "title": "RDS Free Storage (GB)",
+          "type": "stat",
+          "gridPos": {"x":0,"y":8,"w":6,"h":6},
+          "targets": [{
+            "expr": "aws_rds_free_storage_space_average / 1024 / 1024 / 1024",
+            "legendFormat": "Free GB"
+          }]
+        },
+        {
+          "title": "RDS Write Latency (ms)",
+          "type": "timeseries",
+          "gridPos": {"x":6,"y":8,"w":6,"h":6},
+          "targets": [{
+            "expr": "aws_rds_write_latency_average * 1000",
+            "legendFormat": "Write latency"
+          }]
+        },
+        {
+          "title": "ALB Request Count",
+          "type": "timeseries",
+          "gridPos": {"x":0,"y":14,"w":12,"h":8},
+          "targets": [{
+            "expr": "aws_applicationelb_request_count_sum",
+            "legendFormat": "Requests"
+          }]
+        },
+        {
+          "title": "ALB 5xx Errors",
+          "type": "timeseries",
+          "gridPos": {"x":12,"y":14,"w":12,"h":8},
+          "targets": [{
+            "expr": "aws_applicationelb_httpcode_elb_5_xx_count_sum",
+            "legendFormat": "5xx errors"
+          }]
+        },
+        {
+          "title": "ALB p99 Response Time (ms)",
+          "type": "timeseries",
+          "gridPos": {"x":0,"y":22,"w":12,"h":8},
+          "targets": [{
+            "expr": "aws_applicationelb_target_response_time_p99 * 1000",
+            "legendFormat": "p99 latency"
+          }]
+        },
+        {
+          "title": "ALB Unhealthy Hosts",
+          "type": "stat",
+          "gridPos": {"x":12,"y":22,"w":12,"h":8},
+          "targets": [{
+            "expr": "aws_applicationelb_un_healthy_host_count_average",
+            "legendFormat": "Unhealthy"
+          }]
+        }
+      ],
+      "schemaVersion": 36,
+      "version": 1
+    }

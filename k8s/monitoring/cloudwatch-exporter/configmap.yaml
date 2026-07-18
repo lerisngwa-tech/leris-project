@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudwatch-exporter-config
+  namespace: monitoring
+data:
+  config.yml: |
+    region: us-east-1
+    period_seconds: 60
+    set_timestamp: true
+
+    metrics:
+
+      # ── RDS PostgreSQL ───────────────────────────────────────────────────
+      - aws_namespace: AWS/RDS
+        aws_metric_name: CPUUtilization
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/RDS
+        aws_metric_name: DatabaseConnections
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_statistics: [Average, Maximum]
+
+      - aws_namespace: AWS/RDS
+        aws_metric_name: FreeStorageSpace
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/RDS
+        aws_metric_name: ReadLatency
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_statistics: [Average, p99]
+
+      - aws_namespace: AWS/RDS
+        aws_metric_name: WriteLatency
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_statistics: [Average, p99]
+
+      - aws_namespace: AWS/RDS
+        aws_metric_name: FreeableMemory
+        aws_dimensions: [DBInstanceIdentifier]
+        aws_statistics: [Average]
+
+      # ── ALB ──────────────────────────────────────────────────────────────
+      - aws_namespace: AWS/ApplicationELB
+        aws_metric_name: RequestCount
+        aws_dimensions: [LoadBalancer]
+        aws_statistics: [Sum]
+
+      - aws_namespace: AWS/ApplicationELB
+        aws_metric_name: HTTPCode_ELB_5XX_Count
+        aws_dimensions: [LoadBalancer]
+        aws_statistics: [Sum]
+
+      - aws_namespace: AWS/ApplicationELB
+        aws_metric_name: HTTPCode_ELB_4XX_Count
+        aws_dimensions: [LoadBalancer]
+        aws_statistics: [Sum]
+
+      - aws_namespace: AWS/ApplicationELB
+        aws_metric_name: TargetResponseTime
+        aws_dimensions: [LoadBalancer]
+        aws_statistics: [Average, p95, p99]
+
+      - aws_namespace: AWS/ApplicationELB
+        aws_metric_name: HealthyHostCount
+        aws_dimensions: [LoadBalancer, TargetGroup]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/ApplicationELB
+        aws_metric_name: UnHealthyHostCount
+        aws_dimensions: [LoadBalancer, TargetGroup]
+        aws_statistics: [Average]
+
+      # ── EKS ──────────────────────────────────────────────────────────────
+      - aws_namespace: AWS/EKS
+        aws_metric_name: cluster_failed_node_count
+        aws_dimensions: [ClusterName]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/EKS
+        aws_metric_name: node_cpu_utilization
+        aws_dimensions: [ClusterName]
+        aws_statistics: [Average]
+
+      - aws_namespace: AWS/EKS
+        aws_metric_name: node_memory_utilization
+        aws_dimensions: [ClusterName]
+        aws_statistics: [Average]
