@@ -49,22 +49,35 @@ flowchart TB
             K8SSEC[("db-credentials\nKubernetes Secret")]
         end
 
+        subgraph MON["EKS Cluster · monitoring namespace"]
+            Prom["Prometheus\n30s scrape interval"]
+            Graf["Grafana\n/grafana"]
+            CWE["CloudWatch Exporter"]
+        end
+
         RDS[("RDS PostgreSQL 16\nMulti-AZ · Encrypted")]
-        SM[("Secrets Manager\nonboarding/db-credentials")]
+        SM[("Secrets Manager\ndb-credentials · grafana-admin")]
         ECR[("ECR\nbackend + frontend images")]
         S3[("S3\ndocuments + assets")]
+        CW[("Amazon CloudWatch\nRDS · ALB · EKS metrics")]
         KMS{{"KMS\ncustomer-managed key"}}
     end
 
     User -- HTTPS --> ALB
     ALB -- "path: /" --> FE
     ALB -- "path: /api" --> BE
+    ALB -- "path: /grafana" --> Graf
     FE -- "proxy_pass /api" --> BE
     BE -- "TLS · port 5432" --> RDS
     BE -- "PutObject" --> S3
     ESO -- "GetSecretValue" --> SM
     ESO -- "sync" --> K8SSEC
     K8SSEC -.env vars.-> BE
+    Prom -- "scrape :3000/metrics" --> BE
+    Prom -- "scrape kubelet/cAdvisor" --> EKS
+    Prom -- "scrape :9106/metrics" --> CWE
+    CWE -- "GetMetricData (IRSA)" --> CW
+    Graf -- "query" --> Prom
     SM -.KMS-encrypted.-> KMS
     RDS -.KMS-encrypted.-> KMS
     ECR -.KMS-encrypted.-> KMS
@@ -75,14 +88,17 @@ flowchart TB
 
 | Component | File | Responsibility |
 |---|---|---|
-| **ALB Ingress** | `k8s/ingress.yaml` | Single internet-facing entry point; path-based routing to frontend and backend Services |
-| **Frontend** | `frontend/` | React SPA compiled by Vite, served by nginx; proxies `/api/*` to backend — browser never calls backend directly |
-| **Backend** | `backend/` | Stateless Express REST API; sole component with a database connection |
+| **ALB Ingress** | `k8s/ingress.yaml` | Single internet-facing entry point; path-based routing to frontend, backend, and Grafana |
+| **Frontend** | `frontend/` | React SPA compiled by Vite, served by nginx; proxies `/api/*` to backend |
+| **Backend** | `backend/` | Stateless Express REST API; sole component with a database connection; exposes `/metrics` |
 | **RDS PostgreSQL** | `terraform/main.tf` | System of record — `candidates` and `employees` tables; Multi-AZ, encrypted at rest |
 | **External Secrets Operator** | `k8s/external-secrets.yaml` | Syncs DB credentials from Secrets Manager into a Kubernetes Secret every hour |
 | **ECR** | `terraform/main.tf` | Immutable, KMS-encrypted image registry with scan-on-push for both services |
 | **S3** | `terraform/main.tf` | Document and asset storage; versioned, KMS-encrypted, no public access |
 | **KMS** | `terraform/security.tf` | Single customer-managed key with auto-rotation encrypting all data stores |
+| **Prometheus** | `k8s/monitoring/prometheus/` | Scrapes EKS nodes, pods, backend app metrics, and CloudWatch exporter — 30s interval |
+| **Grafana** | `k8s/monitoring/grafana/` | Dashboards at `/grafana`; datasource and dashboards auto-provisioned from ConfigMaps |
+| **CloudWatch Exporter** | `k8s/monitoring/cloudwatch-exporter/` | Bridges RDS, ALB, and EKS CloudWatch metrics into Prometheus format via IRSA |
 
 ---
 
@@ -93,11 +109,12 @@ flowchart TB
 - React 18 SPA built with Vite; two views — **Candidates** (hiring and screening) and **Employees** (onboarding tracking)
 - All API calls use relative `/api/*` paths — the browser never holds a backend address
 - Served by nginx on port 80; `nginx.conf` handles SPA fallback routing (`try_files $uri /index.html`) and reverse-proxies `/api` to `backend-svc.onboarding.svc.cluster.local`
-- **Container:** multi-stage build — `node:20-alpine` compiles the Vite bundle, `nginx:1.27-alpine` serves it; runs as non-root, read-only root filesystem, all Linux capabilities dropped
+- **Container:** multi-stage build — `node:20-alpine` compiles the Vite bundle, `nginx:1.27-alpine` serves it; runs as non-root UID 101, read-only root filesystem, all Linux capabilities dropped
 
 ### Backend — `backend/`
 
 - Express REST API on port 3000; stateless — any replica can serve any request
+- Exposes `/metrics` endpoint via `prom-client` — HTTP request counter, duration histogram, and default Node.js runtime metrics
 - **Routes:**
 
 | Method | Path | Description |
@@ -107,6 +124,7 @@ flowchart TB
 | `PATCH` | `/api/candidates/:id/status` | Update candidate status (`pending` / `approved` / `rejected`) |
 | `GET` | `/api/employees` | List all onboarded employees |
 | `POST` | `/api/employees` | Add a new employee |
+| `GET` | `/metrics` | Prometheus metrics scrape endpoint |
 
 - Connects to PostgreSQL via `pg.Pool`; creates its own tables on boot (`CREATE TABLE IF NOT EXISTS`) — no separate migration step
 - DB credentials injected as environment variables from the Kubernetes Secret managed by External Secrets Operator
@@ -167,6 +185,33 @@ sequenceDiagram
 
     K8S-->>BE: injected as env vars at pod start
     note over BE: DB_USER, DB_PASS, DB_HOST, DB_NAME
+```
+
+### Observability Data Flow
+
+```mermaid
+sequenceDiagram
+    participant BE as Backend Pod
+    participant KUB as kubelet / cAdvisor
+    participant Prom as Prometheus
+    participant CWE as CloudWatch Exporter
+    participant CW as Amazon CloudWatch
+    participant Graf as Grafana
+    participant U as Engineer
+
+    loop Every 30s
+        Prom->>BE: GET /metrics (HTTP request rate, latency, errors)
+        Prom->>KUB: GET /metrics/cadvisor (CPU, memory, disk per container)
+        Prom->>CWE: GET :9106/metrics
+        CWE->>CW: GetMetricData (RDS, ALB, EKS via IRSA)
+        CW-->>CWE: metric data points
+        CWE-->>Prom: CloudWatch metrics in Prometheus format
+    end
+
+    U->>Graf: open dashboard
+    Graf->>Prom: PromQL query
+    Prom-->>Graf: time-series data
+    Graf-->>U: rendered panels
 ```
 
 ### CI/CD Deployment Flow
@@ -249,16 +294,18 @@ EKS worker nodes and the RDS instance live exclusively in the private subnets. T
 | `frontend-allow-ingress` | `app: frontend` | Accepts ingress only from `kube-system` namespace on port 80 |
 | `backend-egress` | `app: backend` | Egress restricted to port 5432 (RDS), 443 (AWS APIs), 53/UDP (DNS) |
 
-### ALB Ingress Routing — `k8s/ingress.yaml`
+### ALB Ingress Routing
 
-| Path | Service | Target Port |
-|---|---|---|
-| `/api` | `backend-svc:80` | backend pods `:3000` |
-| `/` | `frontend-svc:80` | frontend pods `:80` |
+| Path | Namespace | Service | Target Port |
+|---|---|---|---|
+| `/api` | `onboarding` | `backend-svc:80` | backend pods `:3000` |
+| `/` | `onboarding` | `frontend-svc:80` | frontend pods `:80` |
+| `/grafana` | `monitoring` | `grafana:3000` | Grafana pods `:3000` |
 
 ```bash
-# Get the live ALB address
+# Get the live ALB addresses
 kubectl get ingress onboarding-ingress -n onboarding
+kubectl get ingress monitoring-ingress -n monitoring
 ```
 
 ---
@@ -270,7 +317,7 @@ Security is applied at every layer of the stack — from the developer's worksta
 | Layer | Control |
 |---|---|
 | **AWS Credentials** | GitHub Actions authenticates via OIDC federation — no long-lived access keys stored anywhere |
-| **IAM** | Least-privilege per workload: `github-actions-role` (ECR push + EKS describe), `external-secrets-role` (read one secret via IRSA), `rds-monitoring-role` (enhanced monitoring only) |
+| **IAM** | Least-privilege per workload: `github-actions-role` (ECR push + EKS describe), `external-secrets-role` (read one secret via IRSA), `cloudwatch-exporter-role` (read-only CloudWatch via IRSA), `rds-monitoring-role` (enhanced monitoring only) |
 | **Secrets** | Never touch the pipeline or the image; synced directly from Secrets Manager into a Kubernetes Secret by External Secrets Operator every hour |
 | **Container Runtime** | Both images run as non-root; backend uses distroless (no shell, no package manager); frontend uses nginx as UID 101; read-only root filesystem; all Linux capabilities dropped |
 | **Network** | Default-deny Kubernetes NetworkPolicies scoped per tier; RDS accessible only from within the VPC |
@@ -284,46 +331,80 @@ Security is applied at every layer of the stack — from the developer's worksta
 
 ## Observability
 
-Metrics live in a separate `monitoring` namespace, applied directly by a cluster admin rather than by CI/CD. This is a deliberate boundary, not an oversight: `github-actions-role` is scoped by EKS access entry to the `onboarding` namespace only (`terraform/main.tf`), and cannot reach `monitoring` or any cluster-scoped resource — the same reason `k8s/bootstrap/rbac.yaml` is kept out of the CD-applied path. The role that deploys the app must not be able to grant itself cluster-wide access.
+Metrics live in a separate `monitoring` namespace, applied directly by a cluster admin rather than by CI/CD. This is a deliberate boundary — `github-actions-role` is scoped to the `onboarding` namespace only and cannot reach `monitoring` or any cluster-scoped resource. The role that deploys the app must not be able to grant itself cluster-wide access.
 
 ```mermaid
 flowchart TB
     subgraph EKS["EKS Cluster"]
         subgraph ONB["onboarding namespace — CD-managed"]
             BEpods["backend pods\n/metrics"]
+            FEpods["frontend pods"]
         end
 
         subgraph MON["monitoring namespace — admin-applied only"]
             Prom["Prometheus\n30s scrape interval"]
-            CWE["cloudwatch-exporter"]
+            CWE["cloudwatch-exporter\n:9106/metrics"]
             Graf["Grafana\nserved at /grafana"]
         end
     end
 
-    CW[("Amazon CloudWatch\nRDS + ALB metrics")]
+    CW[("Amazon CloudWatch\nRDS · ALB · EKS")]
     ALB2["ALB\n(monitoring-ingress)"]
 
     Prom -- "scrape :3000/metrics" --> BEpods
     Prom -- "scrape kubelet/cAdvisor" --> EKS
     Prom -- "scrape :9106/metrics" --> CWE
     CWE -- "GetMetricData (IRSA)" --> CW
-    Graf -- "query" --> Prom
-    ALB2 --> Graf
+    Graf -- "PromQL queries" --> Prom
+    ALB2 -- "/grafana" --> Graf
 ```
 
-| Component | Manifest | Responsibility |
-|---|---|---|
-| **Prometheus** | `k8s/monitoring/prometheus/` | Scrapes EKS node/pod metrics (kubelet, cAdvisor), the backend's `/metrics` endpoint, and the CloudWatch exporter — 30s interval |
-| **cloudwatch-exporter** | `k8s/monitoring/cloudwatch-exporter/` | Bridges CloudWatch metrics (RDS, ALB) into Prometheus format via a scoped IRSA role (`cloudwatch:GetMetricData`/`ListMetrics` only) |
-| **Grafana** | `k8s/monitoring/grafana/` | Dashboards at `/grafana`; Prometheus datasource and dashboards auto-provisioned from ConfigMaps; admin password sourced from `onboarding/grafana-admin` in Secrets Manager |
-| **Ingress** | `k8s/monitoring/ingress.yaml` | Separate internet-facing ALB, path-scoped to `/grafana` |
+### Grafana Dashboards
 
-Bootstrapping the stack (cluster-admin credentials, one time):
+Three dashboards are auto-provisioned from ConfigMaps on startup — no manual setup required.
+
+| Dashboard | Metrics Covered |
+|---|---|
+| **Platform — EKS Nodes & Pods** | Node CPU utilisation, node memory utilisation, pod restarts, pod CPU usage per container |
+| **Application — Backend API** | HTTP request rate by route, 5xx error rate, p99 latency histogram, active DB connections |
+| **CloudWatch — RDS & ALB** | RDS CPU, DB connections, free storage, read/write latency; ALB request count, 4xx/5xx errors, p99 response time, unhealthy host count |
+
+### Prometheus Scrape Targets
+
+| Job | Target | Metrics |
+|---|---|---|
+| `kubernetes-nodes` | kubelet HTTPS on each node | Node CPU, memory, disk, network |
+| `kubernetes-cadvisor` | cAdvisor on each node | Per-container CPU, memory, filesystem |
+| `kubernetes-pods` | Any pod with `prometheus.io/scrape: "true"` | Application-defined metrics |
+| `onboarding-backend` | `backend-svc:80/metrics` | HTTP request count, duration histogram, Node.js runtime |
+| `cloudwatch-exporter` | `cloudwatch-exporter:9106` | RDS, ALB, EKS metrics from CloudWatch |
+
+### Grafana Access
+
+| | |
+|---|---|
+| **URL** | `http://<monitoring-ingress-ADDRESS>/grafana` |
+| **Username** | `admin` |
+| **Password** | Retrieved from Secrets Manager — see bootstrap instructions below |
+
+```bash
+# Retrieve the Grafana admin password at any time
+aws secretsmanager get-secret-value \
+  --secret-id onboarding/grafana-admin \
+  --query 'SecretString' --output text | jq -r '.password'
+```
+
+### Bootstrapping the Monitoring Stack
+
+The monitoring stack is applied once by a cluster admin with cluster-admin credentials. It is never touched by CI/CD.
 
 ```bash
 kubectl apply -f k8s/monitoring/namespace.yaml
-bash k8s/monitoring/bootstrap-grafana-secret.sh   # pulls the admin password from Secrets Manager
-kubectl apply -R -f k8s/monitoring/
+bash k8s/monitoring/bootstrap-grafana-secret.sh   # pulls password from Secrets Manager
+kubectl apply -f k8s/monitoring/prometheus/
+kubectl apply -f k8s/monitoring/cloudwatch-exporter/
+kubectl apply -f k8s/monitoring/grafana/
+kubectl apply -f k8s/monitoring/ingress.yaml
 ```
 
 ---
@@ -369,7 +450,7 @@ flowchart LR
 
 ### GitHub Environments Setup
 
-Create three environments in **Settings → Environments**: `ci`, `staging`, `production`.  
+Create three environments in **Settings → Environments**: `ci`, `staging`, `production`.
 Enable **Required reviewers** on `production`.
 
 Add the following variables to `staging` and `production`:
@@ -396,52 +477,56 @@ Add to `ci`:
 .
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml              # Security gates — runs on every push and PR
-│       └── cd.yml              # Build, push, deploy — runs on merge to main
+│       ├── ci.yml                    # Security gates — runs on every push and PR
+│       └── cd.yml                    # Build, push, deploy — runs on merge to main
 │
 ├── backend/
-│   ├── Dockerfile              # Multi-stage: node:20-alpine → distroless
+│   ├── Dockerfile                    # Multi-stage: node:20-alpine → distroless
 │   ├── package.json
-│   └── index.js                # Express API — candidates + employees routes
+│   └── index.js                      # Express API + Prometheus metrics endpoint
 │
 ├── frontend/
-│   ├── Dockerfile              # Multi-stage: node:20-alpine → nginx:1.27-alpine
-│   ├── nginx.conf              # SPA fallback + /api proxy to backend-svc
+│   ├── Dockerfile                    # Multi-stage: node:20-alpine → nginx:1.27-alpine
+│   ├── nginx.conf                    # SPA fallback + /api proxy to backend-svc
 │   ├── vite.config.js
 │   ├── package.json
 │   └── src/
-│       ├── main.jsx            # React router entry point
+│       ├── main.jsx                  # React router entry point
 │       └── pages/
-│           ├── Candidates.jsx  # Hiring and screening view
-│           └── Onboarding.jsx  # Employee onboarding view
+│           ├── Candidates.jsx        # Hiring and screening view
+│           └── Onboarding.jsx        # Employee onboarding view
 │
 ├── k8s/
-│   ├── external-secrets.yaml   # SecretStore + ExternalSecret (Secrets Manager → K8s)
-│   ├── backend.yaml            # Deployment + Service
-│   ├── frontend.yaml           # Deployment + Service
-│   ├── ingress.yaml            # ALB Ingress — path-based routing
-│   ├── network-policy.yaml     # Default-deny NetworkPolicies per tier
-│   ├── pdb.yaml                # PodDisruptionBudgets (minAvailable: 1)
+│   ├── external-secrets.yaml         # SecretStore + ExternalSecret (Secrets Manager → K8s)
+│   ├── backend.yaml                  # Deployment + Service (Prometheus annotations included)
+│   ├── frontend.yaml                 # Deployment + Service
+│   ├── ingress.yaml                  # ALB Ingress — path-based routing
+│   ├── network-policy.yaml           # Default-deny NetworkPolicies per tier
+│   ├── pdb.yaml                      # PodDisruptionBudgets (minAvailable: 1)
 │   │
-│   ├── bootstrap/
-│   │   └── rbac.yaml           # Admin-applied only — CD must never grant itself RBAC
-│   │
-│   └── monitoring/              # Admin-applied only — outside CD's namespace scope
+│   └── monitoring/                   # Admin-applied only — outside CD's namespace scope
 │       ├── namespace.yaml
-│       ├── ingress.yaml         # Separate ALB, path-scoped to /grafana
+│       ├── ingress.yaml              # Separate ALB, path-scoped to /grafana
 │       ├── bootstrap-grafana-secret.sh
 │       ├── prometheus/
+│       │   ├── rbac.yaml             # ClusterRole for pod/node discovery
+│       │   ├── configmap.yaml        # Scrape configs
+│       │   └── deployment.yaml       # Deployment + Service
 │       ├── grafana/
+│       │   ├── configmap.yaml        # Datasource + dashboard provisioning
+│       │   └── deployment.yaml       # Deployment + Service
 │       └── cloudwatch-exporter/
+│           ├── configmap.yaml        # CloudWatch metrics config (RDS, ALB, EKS)
+│           └── deployment.yaml       # Deployment + Service + IRSA ServiceAccount
 │
 ├── terraform/
-│   ├── main.tf                 # VPC, EKS, ECR, S3, RDS, Secrets Manager
-│   ├── security.tf             # KMS, OIDC provider, IAM roles and policies
-│   ├── monitoring.tf            # cloudwatch-exporter IRSA role, Grafana admin secret
+│   ├── main.tf                       # VPC, EKS, ECR, S3, RDS, Secrets Manager
+│   ├── security.tf                   # KMS, OIDC provider, IAM roles and policies
+│   ├── monitoring.tf                 # CloudWatch exporter IRSA role, Grafana secret
 │   ├── variables.tf
 │   └── outputs.tf
 │
-└── .checkov.ini                # IaC scan suppressions with documented reasons
+└── .checkov.ini                      # IaC scan suppressions with documented reasons
 ```
 
 ---
@@ -461,7 +546,9 @@ Add to `ci`:
 ```bash
 cd terraform
 terraform init
-terraform apply -var="db_password=<YOUR_STRONG_PASSWORD>"
+terraform apply \
+  -var="db_password=<YOUR_STRONG_PASSWORD>" \
+  -var="grafana_password=<YOUR_GRAFANA_PASSWORD>"
 ```
 
 Note the outputs — you will need `eks_cluster_name`, `ecr_backend_url`, and `ecr_frontend_url`.
@@ -496,49 +583,54 @@ aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin \
     246312965731.dkr.ecr.us-east-1.amazonaws.com
 
-# Backend — tag with a commit SHA, not :latest
-# (ECR repos use immutable tags; a floating :latest tag can never be
-# overwritten once pushed, so CI/CD tags every build with git SHA only)
+# Backend
 cd backend
-SHA=$(git rev-parse HEAD)
-docker build -t 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-backend:$SHA .
-docker push 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-backend:$SHA
+docker build -t onboarding-backend .
+docker tag onboarding-backend:latest \
+  246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-backend:latest
+docker push 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-backend:latest
 
 # Frontend
 cd ../frontend
-docker build -t 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-frontend:$SHA .
-docker push 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-frontend:$SHA
+docker build -t onboarding-frontend .
+docker tag onboarding-frontend:latest \
+  246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-frontend:latest
+docker push 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-frontend:latest
 ```
 
-### 5 — Deploy to Kubernetes
+### 5 — Deploy Application to Kubernetes
 
 ```bash
 kubectl apply -f k8s/external-secrets.yaml
-kubectl apply -f k8s/
+kubectl apply -f k8s/backend.yaml
+kubectl apply -f k8s/frontend.yaml
+kubectl apply -f k8s/ingress.yaml
+kubectl apply -f k8s/network-policy.yaml
+kubectl apply -f k8s/pdb.yaml
 ```
 
-This is deliberately **not** recursive (`-f`, not `-R -f`) — it only picks up the flat files directly under `k8s/`. This is what CD runs on every merge, using `github-actions-role`, which is scoped to the `onboarding` namespace only.
+### 6 — Bootstrap Monitoring Stack
 
-`k8s/bootstrap/` and `k8s/monitoring/` are excluded from that path on purpose and must be applied separately, once, with cluster-admin credentials:
+This is applied once by a cluster admin. CI/CD never touches the `monitoring` namespace.
 
 ```bash
-kubectl apply -f k8s/bootstrap/rbac.yaml
-
 kubectl apply -f k8s/monitoring/namespace.yaml
 bash k8s/monitoring/bootstrap-grafana-secret.sh
-kubectl apply -R -f k8s/monitoring/
+kubectl apply -f k8s/monitoring/prometheus/
+kubectl apply -f k8s/monitoring/cloudwatch-exporter/
+kubectl apply -f k8s/monitoring/grafana/
+kubectl apply -f k8s/monitoring/ingress.yaml
 ```
 
-See [Observability](#observability) for why this split exists.
-
-### 6 — Get the Application and Grafana URLs
+### 7 — Get Application and Grafana URLs
 
 ```bash
 kubectl get ingress onboarding-ingress -n onboarding
 kubectl get ingress monitoring-ingress -n monitoring
 ```
 
-Open the app's `ADDRESS` value in your browser; open Grafana at `http://<monitoring ADDRESS>/grafana`.
+- Open the `onboarding-ingress` ADDRESS in your browser for the application
+- Open `http://<monitoring-ingress ADDRESS>/grafana` for Grafana
 
 > After the initial setup, all subsequent application deployments are fully automated — push to `main` and the CI/CD pipeline handles the rest. The monitoring stack is not touched by CD and only changes when re-applied manually.
 
@@ -553,3 +645,5 @@ Documented intentionally rather than silently omitted.
 | **Secrets Manager rotation Lambda** | Requires a custom Lambda function wired to RDS; `CKV2_AWS_57` skipped in `.checkov.ini` | Implement a rotation Lambda using the `aws_secretsmanager_secret_rotation` resource |
 | **Single NAT Gateway** | Cost trade-off for a non-production workload; a production deployment should use one NAT Gateway per AZ for full fault isolation | Add `one_nat_gateway_per_az = true` in the VPC module |
 | **S3 cross-region replication** | Not required for this use case; `CKV_AWS_144` skipped in `.checkov.ini` | Add replication configuration if disaster recovery requirements demand it |
+| **Prometheus persistent storage** | Uses `emptyDir` — metrics are lost on pod restart; acceptable for a dev/staging setup | Replace with a `PersistentVolumeClaim` backed by `gp3` EBS for production |
+| **Grafana persistent storage** | Uses `emptyDir` — any manually created dashboards are lost on pod restart | Replace with a `PersistentVolumeClaim`; all provisioned dashboards survive as they are in ConfigMaps |
