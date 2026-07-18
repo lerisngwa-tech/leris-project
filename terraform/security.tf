@@ -49,12 +49,7 @@ resource "aws_eks_addon" "guardduty" {
 }
 
 # ── GitHub Actions OIDC role (no long-lived AWS keys) ────────────────────────
-data "aws_iam_openid_connect_provider" "github" {
-  url = "https://token.actions.githubusercontent.com"
-}
-
 resource "aws_iam_openid_connect_provider" "github" {
-  count           = 1
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
@@ -68,12 +63,12 @@ resource "aws_iam_role" "github_actions" {
     Statement = [{
       Effect = "Allow"
       Principal = {
-        Federated = aws_iam_openid_connect_provider.github[0].arn
+        Federated = aws_iam_openid_connect_provider.github.arn
       }
       Action = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:<GITHUB_ORG>/<GITHUB_REPO>:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub" = "repo:lerisngwa-tech/leris-project:ref:refs/heads/main"
         }
       }
     }]

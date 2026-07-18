@@ -6,57 +6,53 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  AWS_REGION: us-east-1
-
 jobs:
-  # ── Backend lint + audit ───────────────────────────────────────────────────
+  # ── Backend audit ──────────────────────────────────────────────────────────
   backend-checks:
     runs-on: ubuntu-latest
+    environment: ci
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ vars.NODE_VERSION }}
           cache: npm
           cache-dependency-path: backend/package.json
 
-      - name: Install dependencies
-        run: npm install
+      - run: npm install
         working-directory: backend
 
-      - name: npm audit
-        run: npm audit --audit-level=high
+      - run: npm audit --audit-level=high
         working-directory: backend
 
-  # ── Frontend lint + audit ──────────────────────────────────────────────────
+  # ── Frontend audit ─────────────────────────────────────────────────────────
   frontend-checks:
     runs-on: ubuntu-latest
+    environment: ci
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ vars.NODE_VERSION }}
           cache: npm
           cache-dependency-path: frontend/package.json
 
-      - name: Install dependencies
-        run: npm install
+      - run: npm install
         working-directory: frontend
 
-      - name: npm audit
-        run: npm audit --audit-level=high
+      - run: npm audit --audit-level=high
         working-directory: frontend
 
-  # ── IaC security scan (Checkov) ────────────────────────────────────────────
+  # ── IaC scan (Checkov) ─────────────────────────────────────────────────────
   iac-scan:
     runs-on: ubuntu-latest
+    environment: ci
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkov Terraform scan
+      - name: Checkov Terraform
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: terraform
@@ -64,7 +60,7 @@ jobs:
           soft_fail: false
           output_format: cli
 
-      - name: Checkov K8s scan
+      - name: Checkov K8s
         uses: bridgecrewio/checkov-action@v12
         with:
           directory: k8s
@@ -72,17 +68,18 @@ jobs:
           soft_fail: true
           output_format: cli
 
-  # ── Container image scan (Trivy) ───────────────────────────────────────────
+  # ── Image scan (Trivy) ─────────────────────────────────────────────────────
   image-scan:
     runs-on: ubuntu-latest
+    environment: ci
     needs: [backend-checks, frontend-checks]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build backend image
+      - name: Build backend
         run: docker build -t onboarding-backend:${{ github.sha }} ./backend
 
-      - name: Build frontend image
+      - name: Build frontend
         run: docker build -t onboarding-frontend:${{ github.sha }} ./frontend
 
       - name: Trivy scan backend
@@ -106,12 +103,13 @@ jobs:
   # ── Secret detection (Gitleaks) ────────────────────────────────────────────
   secret-scan:
     runs-on: ubuntu-latest
+    environment: ci
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Gitleaks secret scan
+      - name: Gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
