@@ -57,6 +57,15 @@ module "eks" {
         }
       }
     }
+    github_actions = {
+      principal_arn = aws_iam_role.github_actions.arn
+      policy_associations = {
+        edit = {
+          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy"
+          access_scope = { type = "namespace", namespaces = ["onboarding"] }
+        }
+      }
+    }
   }
 
   eks_managed_node_groups = {
@@ -75,6 +84,10 @@ resource "aws_ecr_repository" "backend" {
   image_tag_mutability = "IMMUTABLE"
   force_delete         = true
   image_scanning_configuration { scan_on_push = true }
+  encryption_configuration {
+    encryption_type = "KMS"
+    kms_key         = aws_kms_key.main.arn
+  }
 }
 
 resource "aws_ecr_repository" "frontend" {
@@ -82,6 +95,10 @@ resource "aws_ecr_repository" "frontend" {
   image_tag_mutability = "IMMUTABLE"
   force_delete         = true
   image_scanning_configuration { scan_on_push = true }
+  encryption_configuration {
+    encryption_type = "KMS"
+    kms_key         = aws_kms_key.main.arn
+  }
 }
 
 # ── S3 (documents / assets) ──────────────────────────────────────────────────
@@ -95,6 +112,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "docs" {
   rule {
     id     = "expire-old-versions"
     status = "Enabled"
+    filter {}
     noncurrent_version_expiration { noncurrent_days = 90 }
     abort_incomplete_multipart_upload { days_after_initiation = 7 }
   }
@@ -164,6 +182,10 @@ resource "aws_db_parameter_group" "postgres" {
     name  = "log_min_duration_statement"
     value = "1000"
   }
+  parameter {
+    name  = "rds.force_ssl"
+    value = "1"
+  }
 }
 
 resource "aws_db_instance" "postgres" {
@@ -198,10 +220,6 @@ resource "aws_db_instance" "postgres" {
 resource "aws_secretsmanager_secret" "db" {
   name       = "${var.project}/db-credentials"
   kms_key_id = aws_kms_key.main.arn
-
-  rotation_rules {
-    automatically_after_days = 30
-  }
 }
 
 resource "aws_secretsmanager_secret_version" "db" {

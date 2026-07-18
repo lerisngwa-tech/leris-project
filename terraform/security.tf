@@ -77,7 +77,10 @@ resource "aws_iam_role" "github_actions" {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:lerisngwa-tech/leris-project:*"
+          # GitHub's immutable-ID subject-claim customization is enabled for this repo,
+          # so tokens carry org/repo numeric IDs (repo:ORG@ORG_ID/REPO@REPO_ID:...)
+          # instead of the classic repo:ORG/REPO:... format.
+          "token.actions.githubusercontent.com:sub" = "repo:lerisngwa-tech@274936417/leris-project@1304496638:*"
         }
       }
     }]

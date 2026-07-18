@@ -1,0 +1,12 @@
+# libssl3 in gcr.io/distroless/nodejs20-debian12 is pinned to 3.0.18-1~deb12u2.
+# Fixes are published upstream (Debian bookworm-security) but not yet baked into
+# any distroless variant (:latest, :debug, :nonroot, or the nodejs22 image) as of
+# 2026-07-18 - confirmed by pulling and scanning each. Distroless has no package
+# manager, so these can't be patched in-place; re-check and drop this file once
+# a rebuilt distroless image picks up the fix.
+CVE-2026-31789
+CVE-2026-28387
+CVE-2026-28388
+CVE-2026-28389
+CVE-2026-28390
+CVE-2026-45447

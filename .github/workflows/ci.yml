@@ -91,6 +91,7 @@ jobs:
           exit-code: 1
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          trivyignores: backend/.trivyignore
 
       - name: Trivy scan frontend
         uses: aquasecurity/trivy-action@master
