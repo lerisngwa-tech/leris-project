@@ -7,6 +7,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get("/", (_, res) => res.sendStatus(200));
+
 // ── Prometheus metrics ────────────────────────────────────────────────────────
 const register = new client.Registry();
 client.collectDefaultMetrics({ register });
