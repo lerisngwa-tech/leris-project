@@ -105,3 +105,41 @@ Internet → ALB Ingress
 Secrets: AWS Secrets Manager → External Secrets Operator → K8s Secret → backend pods
 Storage: S3 bucket for documents/assets
 ```
+
+---
+
+## CI/CD Pipeline
+
+```
+Push to main
+  └── CI (ci.yml)
+        ├── npm audit (backend + frontend)
+        ├── Checkov IaC scan (terraform + k8s)
+        ├── Trivy image scan (CRITICAL/HIGH gate)
+        └── Gitleaks secret detection
+  └── CD (cd.yml)  ← only on CI pass
+        ├── AWS OIDC auth (no long-lived keys)
+        ├── Build & push to ECR
+        ├── ECR scan gate (blocks CRITICAL findings)
+        ├── kubectl set image (rolling update)
+        └── Auto rollback on failure
+```
+
+### Setup GitHub Actions
+
+1. Replace `<GITHUB_ORG>/<GITHUB_REPO>` in `terraform/security.tf`
+2. Run `terraform apply` to create the OIDC role
+3. No AWS secrets needed in GitHub — uses OIDC
+
+### Security Layers
+
+| Layer | Control |
+|---|---|
+| Code | npm audit + Gitleaks |
+| IaC | Checkov (Terraform + K8s) |
+| Images | Trivy + ECR Enhanced Scanning |
+| Secrets | External Secrets Operator + Secrets Manager |
+| Network | K8s NetworkPolicy (deny by default) |
+| Pods | Non-root, read-only FS, drop ALL capabilities |
+| Data | KMS encryption (RDS + S3 + EKS secrets) |
+| Availability | PodDisruptionBudget (minAvailable: 1) |

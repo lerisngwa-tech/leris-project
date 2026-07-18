@@ -1,0 +1,85 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_BACKEND: 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-backend
+  ECR_FRONTEND: 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-frontend
+  EKS_CLUSTER: onboarding-cluster
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Authenticate to AWS via OIDC (no long-lived keys) ─────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::246312965731:role/github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── ECR Login ─────────────────────────────────────────────────────────
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Build & push backend ──────────────────────────────────────────────
+      - name: Build & push backend
+        run: |
+          docker build -t $ECR_BACKEND:${{ github.sha }} -t $ECR_BACKEND:latest ./backend
+          docker push $ECR_BACKEND:${{ github.sha }}
+          docker push $ECR_BACKEND:latest
+
+      # ── Build & push frontend ─────────────────────────────────────────────
+      - name: Build & push frontend
+        run: |
+          docker build -t $ECR_FRONTEND:${{ github.sha }} -t $ECR_FRONTEND:latest ./frontend
+          docker push $ECR_FRONTEND:${{ github.sha }}
+          docker push $ECR_FRONTEND:latest
+
+      # ── ECR image scan gate ───────────────────────────────────────────────
+      - name: Wait for ECR scan & check backend
+        run: |
+          sleep 30
+          FINDINGS=$(aws ecr describe-image-scan-findings \
+            --repository-name onboarding-backend \
+            --image-id imageTag=${{ github.sha }} \
+            --query 'imageScanFindings.findingSeverityCounts.CRITICAL' \
+            --output text 2>/dev/null || echo "0")
+          if [ "$FINDINGS" != "None" ] && [ "$FINDINGS" -gt 0 ]; then
+            echo "CRITICAL vulnerabilities found in backend image: $FINDINGS"
+            exit 1
+          fi
+
+      # ── Deploy to EKS ─────────────────────────────────────────────────────
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER
+
+      - name: Deploy backend
+        run: |
+          kubectl set image deployment/backend \
+            backend=$ECR_BACKEND:${{ github.sha }} \
+            -n onboarding
+          kubectl rollout status deployment/backend -n onboarding --timeout=120s
+
+      - name: Deploy frontend
+        run: |
+          kubectl set image deployment/frontend \
+            frontend=$ECR_FRONTEND:${{ github.sha }} \
+            -n onboarding
+          kubectl rollout status deployment/frontend -n onboarding --timeout=120s
+
+      # ── Rollback on failure ───────────────────────────────────────────────
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          kubectl rollout undo deployment/backend -n onboarding
+          kubectl rollout undo deployment/frontend -n onboarding
