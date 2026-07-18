@@ -29,15 +29,13 @@ jobs:
 
       - name: Build & push backend
         run: |
-          docker build -t ${{ vars.ECR_BACKEND }}:${{ github.sha }} -t ${{ vars.ECR_BACKEND }}:latest ./backend
+          docker build -t ${{ vars.ECR_BACKEND }}:${{ github.sha }} ./backend
           docker push ${{ vars.ECR_BACKEND }}:${{ github.sha }}
-          docker push ${{ vars.ECR_BACKEND }}:latest
 
       - name: Build & push frontend
         run: |
-          docker build -t ${{ vars.ECR_FRONTEND }}:${{ github.sha }} -t ${{ vars.ECR_FRONTEND }}:latest ./frontend
+          docker build -t ${{ vars.ECR_FRONTEND }}:${{ github.sha }} ./frontend
           docker push ${{ vars.ECR_FRONTEND }}:${{ github.sha }}
-          docker push ${{ vars.ECR_FRONTEND }}:latest
 
       - name: ECR scan gate
         run: |
@@ -76,7 +74,7 @@ jobs:
       - name: Apply k8s manifests
         run: |
           kubectl apply -f k8s/external-secrets.yaml
-          kubectl apply -f k8s/
+          kubectl apply -R -f k8s/
 
       - name: Deploy to staging
         run: |
@@ -115,7 +113,7 @@ jobs:
       - name: Apply k8s manifests
         run: |
           kubectl apply -f k8s/external-secrets.yaml
-          kubectl apply -f k8s/
+          kubectl apply -R -f k8s/
 
       - name: Deploy to production
         run: |

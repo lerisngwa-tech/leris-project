@@ -27,7 +27,7 @@ spec:
         runAsUser: 65534
       containers:
         - name: cloudwatch-exporter
-          image: prom/cloudwatch-exporter:0.15.5
+          image: prom/cloudwatch-exporter:v0.15.5
           ports:
             - containerPort: 9106
           volumeMounts:
