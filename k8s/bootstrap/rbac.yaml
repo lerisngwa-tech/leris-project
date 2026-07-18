@@ -1,3 +1,5 @@
+# Applied manually by a cluster admin (kubectl apply -f k8s/bootstrap/rbac.yaml),
+# not by CD - the deploying role must not be able to grant itself RBAC.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
