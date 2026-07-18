@@ -93,10 +93,18 @@ resource "aws_iam_role_policy" "github_actions" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["ecr:GetAuthorizationToken", "ecr:BatchCheckLayerAvailability",
-          "ecr:PutImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
-          "ecr:CompleteLayerUpload", "ecr:DescribeImageScanFindings"]
+        Action   = ["ecr:GetAuthorizationToken"]
         Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = ["ecr:BatchCheckLayerAvailability", "ecr:PutImage",
+          "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload", "ecr:DescribeImageScanFindings"]
+        Resource = [
+          aws_ecr_repository.backend.arn,
+          aws_ecr_repository.frontend.arn
+        ]
       },
       {
         Effect   = "Allow"

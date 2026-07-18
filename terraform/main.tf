@@ -72,14 +72,16 @@ module "eks" {
 # ── ECR ──────────────────────────────────────────────────────────────────────
 resource "aws_ecr_repository" "backend" {
   name                 = "${var.project}-backend"
-  image_tag_mutability = "MUTABLE"
+  image_tag_mutability = "IMMUTABLE"
   force_delete         = true
+  image_scanning_configuration { scan_on_push = true }
 }
 
 resource "aws_ecr_repository" "frontend" {
   name                 = "${var.project}-frontend"
-  image_tag_mutability = "MUTABLE"
+  image_tag_mutability = "IMMUTABLE"
   force_delete         = true
+  image_scanning_configuration { scan_on_push = true }
 }
 
 # ── S3 (documents / assets) ──────────────────────────────────────────────────
@@ -94,7 +96,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "docs" {
     id     = "expire-old-versions"
     status = "Enabled"
     noncurrent_version_expiration { noncurrent_days = 90 }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
   }
+}
+
+resource "aws_s3_bucket_logging" "docs" {
+  bucket        = aws_s3_bucket.docs.id
+  target_bucket = aws_s3_bucket.docs.id
+  target_prefix = "access-logs/"
 }
 
 resource "aws_s3_bucket_versioning" "docs" {
@@ -111,20 +120,49 @@ resource "aws_db_subnet_group" "main" {
 }
 
 resource "aws_security_group" "rds" {
-  name   = "${var.project}-rds-sg"
-  vpc_id = module.vpc.vpc_id
+  name        = "${var.project}-rds-sg"
+  description = "RDS PostgreSQL security group - allow VPC inbound only"
+  vpc_id      = module.vpc.vpc_id
 
   ingress {
+    description = "PostgreSQL from VPC"
     from_port   = 5432
     to_port     = 5432
     protocol    = "tcp"
     cidr_blocks = ["10.0.0.0/16"]
   }
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "Allow HTTPS to AWS services"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_iam_role" "rds_monitoring" {
+  name = "${var.project}-rds-monitoring"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{ Effect = "Allow", Principal = { Service = "monitoring.rds.amazonaws.com" }, Action = "sts:AssumeRole" }]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "rds_monitoring" {
+  role       = aws_iam_role.rds_monitoring.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
+}
+
+resource "aws_db_parameter_group" "postgres" {
+  name   = "${var.project}-pg-params"
+  family = "postgres16"
+  parameter {
+    name  = "log_statement"
+    value = "all"
+  }
+  parameter {
+    name  = "log_min_duration_statement"
+    value = "1000"
   }
 }
 
@@ -141,11 +179,29 @@ resource "aws_db_instance" "postgres" {
   vpc_security_group_ids = [aws_security_group.rds.id]
   skip_final_snapshot    = true
   publicly_accessible    = false
+  multi_az                      = true
+  storage_encrypted             = true
+  kms_key_id                    = aws_kms_key.main.arn
+  iam_database_authentication_enabled = true
+  deletion_protection           = true
+  auto_minor_version_upgrade    = true
+  copy_tags_to_snapshot         = true
+  parameter_group_name          = aws_db_parameter_group.postgres.name
+  enabled_cloudwatch_logs_exports = ["postgresql", "upgrade"]
+  performance_insights_enabled  = true
+  performance_insights_kms_key_id = aws_kms_key.main.arn
+  monitoring_interval           = 60
+  monitoring_role_arn           = aws_iam_role.rds_monitoring.arn
 }
 
 # ── Secrets Manager ───────────────────────────────────────────────────────────
 resource "aws_secretsmanager_secret" "db" {
-  name = "${var.project}/db-credentials"
+  name       = "${var.project}/db-credentials"
+  kms_key_id = aws_kms_key.main.arn
+
+  rotation_rules {
+    automatically_after_days = 30
+  }
 }
 
 resource "aws_secretsmanager_secret_version" "db" {

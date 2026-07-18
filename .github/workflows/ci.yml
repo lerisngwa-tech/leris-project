@@ -59,6 +59,7 @@ jobs:
           framework: terraform
           soft_fail: false
           output_format: cli
+          config_file: .checkov.ini
 
       - name: Checkov K8s
         uses: bridgecrewio/checkov-action@v12
