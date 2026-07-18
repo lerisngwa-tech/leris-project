@@ -38,7 +38,7 @@ module "eks" {
   version = "20.8.4"
 
   cluster_name    = "${var.project}-cluster"
-  cluster_version = "1.29"
+  cluster_version = "1.31"
 
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
@@ -108,7 +108,7 @@ resource "aws_security_group" "rds" {
 resource "aws_db_instance" "postgres" {
   identifier             = "${var.project}-db"
   engine                 = "postgres"
-  engine_version         = "15.4"
+  engine_version         = "16.3"
   instance_class         = "db.t3.micro"
   allocated_storage      = 20
   db_name                = "onboardingdb"
