@@ -74,7 +74,7 @@ jobs:
       - name: Apply k8s manifests
         run: |
           kubectl apply -f k8s/external-secrets.yaml
-          kubectl apply -R -f k8s/
+          kubectl apply -f k8s/
 
       - name: Deploy to staging
         run: |
@@ -113,7 +113,7 @@ jobs:
       - name: Apply k8s manifests
         run: |
           kubectl apply -f k8s/external-secrets.yaml
-          kubectl apply -R -f k8s/
+          kubectl apply -f k8s/
 
       - name: Deploy to production
         run: |
