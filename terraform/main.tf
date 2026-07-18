@@ -47,6 +47,17 @@ module "eks" {
 
   enable_cluster_creator_admin_permissions = true
 
+  node_security_group_additional_rules = {
+    ingress_self_all = {
+      description = "Node to node all ports/protocols (pod-to-pod traffic on app ports)"
+      protocol    = "-1"
+      from_port   = 0
+      to_port     = 0
+      type        = "ingress"
+      self        = true
+    }
+  }
+
   access_entries = {
     leris-eks2 = {
       principal_arn = "arn:aws:iam::246312965731:user/leris-eks2"

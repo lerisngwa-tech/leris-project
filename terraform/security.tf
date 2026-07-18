@@ -87,6 +87,44 @@ resource "aws_iam_role" "github_actions" {
   })
 }
 
+# ── External Secrets Operator IAM role (IRSA) ────────────────────────────────
+resource "aws_iam_role" "external_secrets" {
+  name = "external-secrets-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = module.eks.oidc_provider_arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "${module.eks.oidc_provider}:aud" = "sts.amazonaws.com"
+          "${module.eks.oidc_provider}:sub" = "system:serviceaccount:onboarding:external-secrets-sa"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "external_secrets" {
+  name = "external-secrets-policy"
+  role = aws_iam_role.external_secrets.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+        Resource = aws_secretsmanager_secret.db.arn
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "github_actions" {
   name = "github-actions-policy"
   role = aws_iam_role.github_actions.id

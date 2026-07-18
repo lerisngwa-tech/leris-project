@@ -4,7 +4,7 @@ COPY package*.json ./
 RUN npm install --production
 COPY . .
 
-FROM gcr.io/distroless/nodejs20-debian12
+FROM gcr.io/distroless/nodejs20-debian12:nonroot
 WORKDIR /app
 COPY --from=build /app .
 EXPOSE 3000

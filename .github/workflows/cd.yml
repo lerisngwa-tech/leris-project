@@ -73,6 +73,11 @@ jobs:
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --region ${{ vars.AWS_REGION }} --name ${{ vars.EKS_CLUSTER }}
 
+      - name: Apply k8s manifests
+        run: |
+          kubectl apply -f k8s/external-secrets.yaml
+          kubectl apply -f k8s/
+
       - name: Deploy to staging
         run: |
           kubectl set image deployment/backend backend=${{ vars.ECR_BACKEND }}:${{ needs.build.outputs.image_tag }} -n onboarding
@@ -90,7 +95,7 @@ jobs:
   deploy-production:
     runs-on: ubuntu-latest
     environment: production
-    needs: deploy-staging
+    needs: [build, deploy-staging]
     permissions:
       id-token: write
       contents: read
@@ -106,6 +111,11 @@ jobs:
 
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --region ${{ vars.AWS_REGION }} --name ${{ vars.EKS_CLUSTER }}
+
+      - name: Apply k8s manifests
+        run: |
+          kubectl apply -f k8s/external-secrets.yaml
+          kubectl apply -f k8s/
 
       - name: Deploy to production
         run: |
