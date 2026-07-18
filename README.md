@@ -12,6 +12,7 @@
 | **CI/CD** | GitHub Actions — OIDC-authenticated, no stored keys |
 | **Secrets** | AWS Secrets Manager + External Secrets Operator |
 | **Registry** | Amazon ECR — immutable tags, scan-on-push |
+| **Observability** | Prometheus + Grafana + CloudWatch exporter — admin-bootstrapped, outside CI/CD's reach |
 
 ---
 
@@ -22,6 +23,7 @@
 - [Data Flow](#data-flow)
 - [Networking](#networking)
 - [Security](#security)
+- [Observability](#observability)
 - [CI/CD Pipeline](#cicd-pipeline)
 - [Repository Structure](#repository-structure)
 - [Deployment](#deployment)
@@ -280,6 +282,52 @@ Security is applied at every layer of the stack — from the developer's worksta
 
 ---
 
+## Observability
+
+Metrics live in a separate `monitoring` namespace, applied directly by a cluster admin rather than by CI/CD. This is a deliberate boundary, not an oversight: `github-actions-role` is scoped by EKS access entry to the `onboarding` namespace only (`terraform/main.tf`), and cannot reach `monitoring` or any cluster-scoped resource — the same reason `k8s/bootstrap/rbac.yaml` is kept out of the CD-applied path. The role that deploys the app must not be able to grant itself cluster-wide access.
+
+```mermaid
+flowchart TB
+    subgraph EKS["EKS Cluster"]
+        subgraph ONB["onboarding namespace — CD-managed"]
+            BEpods["backend pods\n/metrics"]
+        end
+
+        subgraph MON["monitoring namespace — admin-applied only"]
+            Prom["Prometheus\n30s scrape interval"]
+            CWE["cloudwatch-exporter"]
+            Graf["Grafana\nserved at /grafana"]
+        end
+    end
+
+    CW[("Amazon CloudWatch\nRDS + ALB metrics")]
+    ALB2["ALB\n(monitoring-ingress)"]
+
+    Prom -- "scrape :3000/metrics" --> BEpods
+    Prom -- "scrape kubelet/cAdvisor" --> EKS
+    Prom -- "scrape :9106/metrics" --> CWE
+    CWE -- "GetMetricData (IRSA)" --> CW
+    Graf -- "query" --> Prom
+    ALB2 --> Graf
+```
+
+| Component | Manifest | Responsibility |
+|---|---|---|
+| **Prometheus** | `k8s/monitoring/prometheus/` | Scrapes EKS node/pod metrics (kubelet, cAdvisor), the backend's `/metrics` endpoint, and the CloudWatch exporter — 30s interval |
+| **cloudwatch-exporter** | `k8s/monitoring/cloudwatch-exporter/` | Bridges CloudWatch metrics (RDS, ALB) into Prometheus format via a scoped IRSA role (`cloudwatch:GetMetricData`/`ListMetrics` only) |
+| **Grafana** | `k8s/monitoring/grafana/` | Dashboards at `/grafana`; Prometheus datasource and dashboards auto-provisioned from ConfigMaps; admin password sourced from `onboarding/grafana-admin` in Secrets Manager |
+| **Ingress** | `k8s/monitoring/ingress.yaml` | Separate internet-facing ALB, path-scoped to `/grafana` |
+
+Bootstrapping the stack (cluster-admin credentials, one time):
+
+```bash
+kubectl apply -f k8s/monitoring/namespace.yaml
+bash k8s/monitoring/bootstrap-grafana-secret.sh   # pulls the admin password from Secrets Manager
+kubectl apply -R -f k8s/monitoring/
+```
+
+---
+
 ## CI/CD Pipeline
 
 Two independent GitHub Actions workflows. CI runs on every push and pull request. CD runs only on merge to `main` after CI passes, deploying first to staging then to production behind a manual approval gate.
@@ -373,11 +421,23 @@ Add to `ci`:
 │   ├── frontend.yaml           # Deployment + Service
 │   ├── ingress.yaml            # ALB Ingress — path-based routing
 │   ├── network-policy.yaml     # Default-deny NetworkPolicies per tier
-│   └── pdb.yaml                # PodDisruptionBudgets (minAvailable: 1)
+│   ├── pdb.yaml                # PodDisruptionBudgets (minAvailable: 1)
+│   │
+│   ├── bootstrap/
+│   │   └── rbac.yaml           # Admin-applied only — CD must never grant itself RBAC
+│   │
+│   └── monitoring/              # Admin-applied only — outside CD's namespace scope
+│       ├── namespace.yaml
+│       ├── ingress.yaml         # Separate ALB, path-scoped to /grafana
+│       ├── bootstrap-grafana-secret.sh
+│       ├── prometheus/
+│       ├── grafana/
+│       └── cloudwatch-exporter/
 │
 ├── terraform/
 │   ├── main.tf                 # VPC, EKS, ECR, S3, RDS, Secrets Manager
 │   ├── security.tf             # KMS, OIDC provider, IAM roles and policies
+│   ├── monitoring.tf            # cloudwatch-exporter IRSA role, Grafana admin secret
 │   ├── variables.tf
 │   └── outputs.tf
 │
@@ -436,41 +496,51 @@ aws ecr get-login-password --region us-east-1 \
   | docker login --username AWS --password-stdin \
     246312965731.dkr.ecr.us-east-1.amazonaws.com
 
-# Backend
+# Backend — tag with a commit SHA, not :latest
+# (ECR repos use immutable tags; a floating :latest tag can never be
+# overwritten once pushed, so CI/CD tags every build with git SHA only)
 cd backend
-docker build -t onboarding-backend .
-docker tag onboarding-backend:latest \
-  246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-backend:latest
-docker push 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-backend:latest
+SHA=$(git rev-parse HEAD)
+docker build -t 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-backend:$SHA .
+docker push 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-backend:$SHA
 
 # Frontend
 cd ../frontend
-docker build -t onboarding-frontend .
-docker tag onboarding-frontend:latest \
-  246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-frontend:latest
-docker push 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-frontend:latest
+docker build -t 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-frontend:$SHA .
+docker push 246312965731.dkr.ecr.us-east-1.amazonaws.com/onboarding-frontend:$SHA
 ```
 
 ### 5 — Deploy to Kubernetes
 
 ```bash
 kubectl apply -f k8s/external-secrets.yaml
-kubectl apply -f k8s/backend.yaml
-kubectl apply -f k8s/frontend.yaml
-kubectl apply -f k8s/ingress.yaml
-kubectl apply -f k8s/network-policy.yaml
-kubectl apply -f k8s/pdb.yaml
+kubectl apply -f k8s/
 ```
 
-### 6 — Get the Application URL
+This is deliberately **not** recursive (`-f`, not `-R -f`) — it only picks up the flat files directly under `k8s/`. This is what CD runs on every merge, using `github-actions-role`, which is scoped to the `onboarding` namespace only.
+
+`k8s/bootstrap/` and `k8s/monitoring/` are excluded from that path on purpose and must be applied separately, once, with cluster-admin credentials:
+
+```bash
+kubectl apply -f k8s/bootstrap/rbac.yaml
+
+kubectl apply -f k8s/monitoring/namespace.yaml
+bash k8s/monitoring/bootstrap-grafana-secret.sh
+kubectl apply -R -f k8s/monitoring/
+```
+
+See [Observability](#observability) for why this split exists.
+
+### 6 — Get the Application and Grafana URLs
 
 ```bash
 kubectl get ingress onboarding-ingress -n onboarding
+kubectl get ingress monitoring-ingress -n monitoring
 ```
 
-Open the `ADDRESS` value in your browser.
+Open the app's `ADDRESS` value in your browser; open Grafana at `http://<monitoring ADDRESS>/grafana`.
 
-> After the initial setup, all subsequent deployments are fully automated — push to `main` and the CI/CD pipeline handles the rest.
+> After the initial setup, all subsequent application deployments are fully automated — push to `main` and the CI/CD pipeline handles the rest. The monitoring stack is not touched by CD and only changes when re-applied manually.
 
 ---
 
