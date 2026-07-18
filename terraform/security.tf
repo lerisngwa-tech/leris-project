@@ -41,13 +41,6 @@ resource "aws_ecr_registry_scanning_configuration" "main" {
   }
 }
 
-# ── EKS secrets encryption with KMS ──────────────────────────────────────────
-# Add to eks module in main.tf via cluster_encryption_config
-resource "aws_eks_addon" "guardduty" {
-  cluster_name = module.eks.cluster_name
-  addon_name   = "aws-guardduty-agent"
-}
-
 # ── GitHub Actions OIDC role (no long-lived AWS keys) ────────────────────────
 resource "aws_iam_openid_connect_provider" "github" {
   url             = "https://token.actions.githubusercontent.com"
@@ -68,7 +61,10 @@ resource "aws_iam_role" "github_actions" {
       Action = "sts:AssumeRoleWithWebIdentity"
       Condition = {
         StringLike = {
-          "token.actions.githubusercontent.com:sub" = "repo:lerisngwa-tech/leris-project:ref:refs/heads/main"
+          "token.actions.githubusercontent.com:sub" = "repo:lerisngwa-tech/leris-project:*"
+        },
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
       }
     }]
