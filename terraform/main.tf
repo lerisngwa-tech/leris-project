@@ -89,7 +89,11 @@ module "eks" {
       instance_types = ["t3.small"]
       min_size       = 1
       max_size       = 3
-      desired_size   = 2
+      # t3.small caps at 11 pods/node (ENI IP limit); 2 nodes left no room
+      # for a rolling-update surge pod once ArgoCD's ~7 pods were added on
+      # top of the app + DaemonSets + LB controller + External Secrets,
+      # which is why the CD rollout timed out on `FailedScheduling`.
+      desired_size = 3
     }
   }
 }
