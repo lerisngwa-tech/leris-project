@@ -1,0 +1,45 @@
+# ArgoCD Application for the onboarding app, running ALONGSIDE the existing
+# GitHub Actions CD (.github/workflows/cd.yml), not replacing it.
+#
+# Sync policy is intentionally MANUAL (no `syncPolicy.automated` block):
+# cd.yml still does `kubectl apply` + `kubectl set image` on every push to
+# main. If this Application auto-synced too, both controllers would fight
+# over ownership of the same Deployments (ArgoCD would revert the image tag
+# CD just set, or CD's apply would revert manual ArgoCD-driven changes).
+# Manual sync gives drift detection / diffing today without that conflict.
+#
+# Path is `k8s` with recurse left at its default (false), matching cd.yml's
+# non-recursive `kubectl apply -f k8s/` — this deliberately does NOT reach
+# k8s/bootstrap (RBAC, applied once by a cluster admin) or k8s/monitoring
+# (applied outside the app's deploy path). See PROJECT.md for why: the
+# deploying identity must never be able to grant itself more access.
+#
+# To move to full GitOps later: add `syncPolicy.automated`, and replace
+# cd.yml's `kubectl set image` with a git commit that bumps the image tag
+# (e.g. via `kustomize edit set image` or ArgoCD Image Updater) — ArgoCD
+# only ever applies what's committed to git, it won't pick up an image tag
+# set imperatively by kubectl.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: onboarding
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/lerisngwa-tech/leris-project.git
+    targetRevision: main
+    path: k8s
+    directory:
+      recurse: false
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: onboarding
+
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=false

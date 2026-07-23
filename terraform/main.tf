@@ -45,7 +45,11 @@ module "eks" {
 
   cluster_endpoint_public_access = true
 
-  enable_cluster_creator_admin_permissions = true
+  # Not enabled: the explicit `leris-eks2` entry below already grants this
+  # principal cluster-admin. Turning this on too makes the module try to
+  # create a second access entry for the same ARN (the user running
+  # `terraform apply`), which AWS rejects with ResourceInUseException.
+  enable_cluster_creator_admin_permissions = false
 
   node_security_group_additional_rules = {
     ingress_self_all = {
