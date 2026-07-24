@@ -12,6 +12,7 @@
 | **CI/CD** | GitHub Actions — OIDC-authenticated, no stored keys |
 | **Secrets** | AWS Secrets Manager + External Secrets Operator |
 | **Registry** | Amazon ECR — immutable tags, scan-on-push |
+| **GitOps** | ArgoCD — manual sync, running alongside GitHub Actions CD |
 | **Observability** | Prometheus + Grafana + CloudWatch exporter — admin-bootstrapped, outside CI/CD's reach |
 
 ---
@@ -25,6 +26,7 @@
 - [Security](#security)
 - [Observability](#observability)
 - [CI/CD Pipeline](#cicd-pipeline)
+- [GitOps — ArgoCD](#gitops--argocd)
 - [Repository Structure](#repository-structure)
 - [Deployment](#deployment)
 - [Known Gaps](#known-gaps)
@@ -471,6 +473,54 @@ Add to `ci`:
 
 ---
 
+## GitOps — ArgoCD
+
+ArgoCD runs in-cluster **alongside** `cd.yml`, not in place of it. It watches `k8s/` in this repo and continuously diffs it against the live `onboarding` namespace, giving drift visibility — a second, independent signal that what's running actually matches what's committed — without taking over the deploy path CD already owns.
+
+```mermaid
+flowchart LR
+    Git["k8s/ in this repo\n(main branch)"]
+    Argo["ArgoCD Application\n'onboarding'\nnamespace: argocd"]
+    Live["Live cluster state\nonboarding namespace"]
+    CD["GitHub Actions CD\nkubectl apply / set image"]
+
+    Git -- "watched path: k8s/\nnon-recursive" --> Argo
+    Argo -- "diff" --> Live
+    CD -- "applies directly" --> Live
+    Argo -. "manual sync only —\nnever auto-applies" .-> Live
+```
+
+### Why sync is manual, not automated
+
+Both ArgoCD and `cd.yml` would otherwise be managing the same `Deployment` objects. If ArgoCD's `syncPolicy.automated` were enabled, the two would fight: CD's `kubectl set image` bumps a Deployment to a new SHA-tagged image, and on its next reconcile ArgoCD would revert it back to whatever tag is committed in `k8s/backend.yaml` / `k8s/frontend.yaml` (currently `:latest`) — undoing every CD deploy. `argocd/application.yaml` deliberately omits `syncPolicy.automated` for this reason; sync is a manual, deliberate action (`argocd app sync onboarding`, or the equivalent `kubectl patch application` operation).
+
+### Scope — same boundary CD respects
+
+| Setting | Value | Why |
+|---|---|---|
+| `source.path` | `k8s` | Same directory CD applies |
+| `source.directory.recurse` | `false` (default) | Matches `cd.yml`'s non-recursive `kubectl apply -f k8s/` — does **not** reach `k8s/bootstrap` (RBAC) or `k8s/monitoring`, for the same least-privilege reason CD doesn't: the deploying identity must never be able to grant itself more access |
+| `Namespace/onboarding` sync scope | `argocd.argoproj.io/sync-options: Exclude=true` (in `k8s/external-secrets.yaml`) | `Namespace` is cluster-scoped. `github-actions-role`'s EKS access entry is deliberately scoped to namespace-level edit only and can never `patch` a cluster-scoped object — including a harmless bookkeeping-annotation update. The first time this Application synced, ArgoCD stamped the Namespace with a `tracking-id` annotation, which then made the *next* CD `kubectl apply` try (and fail, `403 Forbidden`) to patch that annotation away. Excluding the Namespace from ArgoCD's sync avoids the conflict entirely — it stays owned by CD's initial create and cluster admins only |
+
+### Access
+
+```bash
+kubectl -n argocd port-forward svc/argocd-server 8080:443
+# https://localhost:8080 — self-signed cert, expected
+
+# Admin password (initial secret — rotate after first login)
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d
+```
+
+There is no public Ingress for ArgoCD — access is via port-forward only, consistent with the rest of the stack's no-unnecessary-exposure posture.
+
+### Promoting to full GitOps (not done here)
+
+`argocd/README.md` has the complete path: drop the `kubectl apply` / `kubectl set image` steps from `cd.yml`, have CI write the built image tag into git instead of setting it imperatively (`kustomize edit set image`, or ArgoCD Image Updater), and turn on `syncPolicy.automated`. Until then, ArgoCD is a diff/drift tool running in parallel with the pipeline that actually ships code.
+
+---
+
 ## Repository Structure
 
 ```
@@ -519,6 +569,10 @@ Add to `ci`:
 │           ├── configmap.yaml        # CloudWatch metrics config (RDS, ALB, EKS)
 │           └── deployment.yaml       # Deployment + Service + IRSA ServiceAccount
 │
+├── argocd/
+│   ├── application.yaml              # ArgoCD Application — manual sync, alongside CD
+│   └── README.md                     # Install steps + path to full GitOps
+│
 ├── terraform/
 │   ├── main.tf                       # VPC, EKS, ECR, S3, RDS, Secrets Manager
 │   ├── security.tf                   # KMS, OIDC provider, IAM roles and policies
@@ -563,12 +617,17 @@ kubectl get nodes  # verify connectivity
 ### 3 — Install Cluster Add-ons
 
 ```bash
-# AWS Load Balancer Controller
+# AWS Load Balancer Controller — the serviceAccount annotation is required:
+# without it the pod silently falls back to the node IAM role (which has no
+# ELB permissions), and the Ingress never provisions a real ALB.
 helm repo add eks https://aws.github.io/eks-charts && helm repo update
 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
   -n kube-system \
   --set clusterName=onboarding-cluster \
-  --set serviceAccount.create=true
+  --set region=us-east-1 \
+  --set vpcId=<VPC_ID_FROM_TERRAFORM_STATE> \
+  --set serviceAccount.create=true \
+  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::246312965731:role/aws-load-balancer-controller-role
 
 # External Secrets Operator
 helm repo add external-secrets https://charts.external-secrets.io && helm repo update
@@ -634,6 +693,26 @@ kubectl get ingress monitoring-ingress -n monitoring
 
 > After the initial setup, all subsequent application deployments are fully automated — push to `main` and the CI/CD pipeline handles the rest. The monitoring stack is not touched by CD and only changes when re-applied manually.
 
+### 8 — Install ArgoCD (optional, admin-applied)
+
+Like the monitoring stack, this is a cluster-admin step — not something CD's namespace-scoped role should be able to do.
+
+```bash
+kubectl create namespace argocd
+kubectl apply -n argocd --server-side --force-conflicts \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+# --server-side avoids a "Too long" error from kubectl apply's
+# last-applied-configuration annotation on the applicationsets CRD
+
+kubectl apply -f argocd/application.yaml
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath='{.data.password}' | base64 -d   # admin password
+```
+
+See [GitOps — ArgoCD](#gitops--argocd) for why sync is manual and what it does and doesn't manage.
+
+> **Node capacity:** `t3.small` nodes cap out at 11 pods each (an ENI IP limit, not CPU/memory). ArgoCD alone adds ~7 pods; combined with the app, DaemonSets, the LB Controller, and External Secrets Operator, 2 nodes leave no headroom for a rolling-update surge pod — the next CD deploy will fail scheduling with `FailedScheduling: Too many pods`. The node group's `desired_size` is `3` for this reason; if you skip installing ArgoCD, 2 nodes is enough.
+
 ---
 
 ## Known Gaps
@@ -647,3 +726,4 @@ Documented intentionally rather than silently omitted.
 | **S3 cross-region replication** | Not required for this use case; `CKV_AWS_144` skipped in `.checkov.ini` | Add replication configuration if disaster recovery requirements demand it |
 | **Prometheus persistent storage** | Uses `emptyDir` — metrics are lost on pod restart; acceptable for a dev/staging setup | Replace with a `PersistentVolumeClaim` backed by `gp3` EBS for production |
 | **Grafana persistent storage** | Uses `emptyDir` — any manually created dashboards are lost on pod restart | Replace with a `PersistentVolumeClaim`; all provisioned dashboards survive as they are in ConfigMaps |
+| **ArgoCD is not the deploy mechanism** | Manual sync only, running alongside `cd.yml` rather than replacing it — see [GitOps — ArgoCD](#gitops--argocd) for why | Drop `kubectl apply`/`set image` from `cd.yml`, move image-tag updates into git, enable `syncPolicy.automated` |
